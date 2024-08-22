@@ -1,7 +1,36 @@
 # Databricks notebook source
+# MAGIC %md
+# MAGIC # [Spatially DB test task] ETL Development on Databricks and Delta Lake Task
+# MAGIC
+# MAGIC ### Introduction
+# MAGIC
+# MAGIC This Databricks notebook implements an ETL (Extract, Transform, Load) pipeline designed to ingest data from two different sources: an API and Azure Blob Storage. The goal is to process the data, perform necessary transformations, and store the final cleaned dataset into a Delta table.
+# MAGIC
+# MAGIC ####Resource Setup:
+# MAGIC    - **App Registration**: For secure and managed access to Azure resources, an App Registration was created, which acts as a Service Principal. This Service Principal is used to authenticate and authorize access to the Storage account.
+# MAGIC    - **Key Vault for Secret Management**: To securely store and manage sensitive information like client secrets and API keys, an Azure Key Vault was set up. The secrets stored in the Key Vault are retrieved dynamically during the execution of the pipeline.
+# MAGIC    - **Azure Storage Account**: An Azure Storage Account was created to store the CSV extract. This storage account is accessed directly from the Databricks environment using the credentials securely managed in the Key Vault.
+# MAGIC
+# MAGIC This approach ensures that the pipeline is both flexible and efficient, capable of handling  datasets from different sources while maintaining data integrity and security through the use of Azure services like Key Vault and App Registration.
+# MAGIC
+# MAGIC
+
+# COMMAND ----------
+
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pyspark.sql.functions import *
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC **Widgets Initialization** 
+# MAGIC
+# MAGIC This section defines the widgets that capture user inputs for configuring the data source and other parameters.
+# MAGIC
+# MAGIC **Dynamic Data Source Selection**:
+# MAGIC    The pipeline is designed to be flexible, allowing the user to choose between two data sources: Azure Blob Storage and an API. This is controlled through the use of Databricks widgets, which provide a user-friendly interface to input parameters such as the data source, storage account details, API endpoints, and other necessary configurations.
+# MAGIC
 
 # COMMAND ----------
 
@@ -59,6 +88,17 @@ if data_source == "BLOB":
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC **Data Ingestion**
+# MAGIC
+# MAGIC Depending on the selected data source, the notebook either connects to Azure Blob Storage or fetches data from the API.
+# MAGIC
+# MAGIC    - **Blob Storage**: If the user selects Blob Storage as the data source, the notebook connects to the specified Azure Storage account using OAuth authentication via the Service Principal. The data is then read directly from a CSV file stored in the Blob container.
+# MAGIC    - **API**: If the API is selected, the notebook fetches the data in batches using Python’s `requests` library. To handle large datasets efficiently, the data retrieval process is parallelized using `ThreadPoolExecutor`.
+# MAGIC
+
+# COMMAND ----------
+
 def fetch_data(base_url, limit, offset):
     query_params = {"$limit": limit, "$offset": offset}
     response = requests.get(base_url, params=query_params)
@@ -97,8 +137,22 @@ else:
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC **Data Transformation**: This section includes the logic for transforming the raw data into a standardized format suitable for storage.
+# MAGIC
+# MAGIC **Data Transformation**:
+# MAGIC    The data is transformed based on its source:
+# MAGIC    - For data ingested from Blob Storage, the pipeline extracts geolocation information from a combined string field, splitting it into latitude and longitude, and then reconstructs it into a JSON format as one commign form the API.
+# MAGIC    - For API data, geolocation fields are directly cast to appropriate data types.
+# MAGIC    - Additional transformations include standardizing column names to snake_case, casting data types for consistency, and refining specific fields based on their content (e.g., categorizing data value types).
+# MAGIC    - There were fields having `~` which should be replaced with `null` but as those columns weren't used the step was also skipped.
+# MAGIC
+
+# COMMAND ----------
+
 
 if data_source == "BLOB":
+    # If source is Blob then we need to transform the geolocation column to struct including human_address, latitude and longitude.
     df_transformed = df.withColumn("latitude", trim(regexp_replace(split(col("geolocation"), ",").getItem(0), "[()]", ""))) \
                    .withColumn("longitude", trim(regexp_replace(split(col("geolocation"), ",").getItem(1), "[()]", ""))) \
                    .drop("geolocation")
@@ -121,9 +175,6 @@ df_transformed = df_transformed.withColumn("yearstart", col("yearstart").cast("i
                                               .otherwise(col("datasource"))) \
                     .withColumn("data_value_type", when(lower(col("question")).contains("percent"), lit("Percent"))
                                                    .otherwise(col("data_value_type")))
-                    
-if data_source == "BLOB":
-    df_transformed = df_transformed.drop("latitude", "longitude")
 
 # Rename and standardize columns to snake_case
 df_transformed = df_transformed.withColumnRenamed("yearstart", "year_start") \
@@ -155,8 +206,35 @@ df_transformed.createOrReplaceGlobalTempView("cleaned_and_transformed_chronic_da
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC **Data Loading**: The transformed data is saved into a Delta table with appropriate filters applied.
+# MAGIC
+# MAGIC **Data Loading**:
+# MAGIC    The final step involves saving the cleaned and transformed data into a Delta table. A SQL query is used to filter the data for specific years and locations before storing it, ensuring that only relevant information is retained.
+# MAGIC
+# MAGIC *same could be achieved using this Python code also:
+# MAGIC ```python
+# MAGIC # Predefined list of US states
+# MAGIC us_states = [
+# MAGIC     "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME",
+# MAGIC     "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA",
+# MAGIC     "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY"
+# MAGIC ]
+# MAGIC
+# MAGIC # Filter the data for the required years, states, and remove the 'Total' records
+# MAGIC df_filtered = df_transformed.filter((col("year_start") >= 2020) & (col("year_end") <= 2022)) \
+# MAGIC                         .filter(col("location_abbreviation").isin(us_states)) \
+# MAGIC                         .filter(~col("stratification_category_1").rlike("(?i)total"))
+# MAGIC
+# MAGIC # Save the filtered dataset in a Delta Lake table 
+# MAGIC table_name = "gold_brfss_dimitrijeski_marin"
+# MAGIC df_filtered.write.format("delta").mode("overwrite").saveAsTable(table_name)
+# MAGIC ```
+
+# COMMAND ----------
+
 # MAGIC %sql
-# MAGIC CREATE OR REPLACE TABLE gold_brfss_doe_john USING DELTA AS
+# MAGIC CREATE OR REPLACE TABLE gold_brfss_dimitrijeski_marin USING DELTA AS
 # MAGIC SELECT *
 # MAGIC FROM global_temp.cleaned_and_transformed_chronic_data
 # MAGIC WHERE year_start >= 2020 
@@ -169,5 +247,5 @@ df_transformed.createOrReplaceGlobalTempView("cleaned_and_transformed_chronic_da
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC SELECT * FROM gold_brfss_doe_john;
+# MAGIC SELECT * FROM gold_brfss_dimitrijeski_marin;
 # MAGIC
