@@ -13,10 +13,11 @@ Before you can run the notebook, you need the following:
    - **Azure Key Vault**: For securely managing secrets (like API keys and service principal credentials).
    - **App Registration**: Used as a Service Principal for accessing Azure resources.
 
+![image](https://github.com/user-attachments/assets/861178b5-32e8-48e9-a398-9f32044f715e)
+
 ## Setup Instructions
 
 ### 1. Clone the Repository
-
 Clone this repository to your local machine:
 
 \`\`\`bash
